@@ -1,7 +1,2 @@
-**/data/__pycache__/
-**/models/__pycache__/
-**/utils/__pycache__/
-**.DS_Store
-**.ipynb_checkpoints
-**.pyc
-
+**/__pycache__/
+*.DS_Store
