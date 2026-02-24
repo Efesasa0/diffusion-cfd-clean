@@ -89,15 +89,16 @@ class VorticityResidual:
             squeeze = True
 
         B, C, H, W = field.shape
+        kx, ky, _ = self._get_spectral_operators(H, W, field.device)
 
         # FFT
         field_hat = torch.fft.fft2(field)
 
         # Multiply by ik
         if direction == 'x':
-            deriv_hat = 1j * self.kx * field_hat
+            deriv_hat = 1j * kx * field_hat
         else:  # y
-            deriv_hat = 1j * self.ky * field_hat
+            deriv_hat = 1j * ky * field_hat
 
         # Inverse FFT
         deriv = torch.fft.ifft2(deriv_hat).real
@@ -107,6 +108,25 @@ class VorticityResidual:
 
         return deriv
 
+    def _get_k_squared(self, H: int, W: int, device: torch.device):
+        """Get k_squared for given resolution."""
+        if H == self.resolution and W == self.resolution:
+            return self.k_squared
+
+        k_y = torch.fft.fftfreq(H, d=1/H, device=device) * 2 * math.pi / self.L
+        k_x = torch.fft.fftfreq(W, d=1/W, device=device) * 2 * math.pi / self.L
+        kx = k_x[None, :].expand(H, W)
+        ky = k_y[:, None].expand(H, W)
+        return kx**2 + ky**2
+
+    def _get_forcing(self, H: int, W: int, device: torch.device):
+        """Get forcing term for given resolution."""
+        if H == self.resolution and W == self.resolution:
+            return self.forcing
+
+        y = torch.linspace(0, self.L, H, device=device)
+        return -4.0 * torch.cos(4.0 * y)[:, None].expand(H, W)
+
     def laplacian(self, field: torch.Tensor) -> torch.Tensor:
         """Compute Laplacian using FFT."""
         squeeze = False
@@ -114,14 +134,35 @@ class VorticityResidual:
             field = field.unsqueeze(1)
             squeeze = True
 
+        B, C, H, W = field.shape
+        k_squared = self._get_k_squared(H, W, field.device)
+
         field_hat = torch.fft.fft2(field)
-        lap_hat = -self.k_squared * field_hat
+        lap_hat = -k_squared * field_hat
         lap = torch.fft.ifft2(lap_hat).real
 
         if squeeze:
             lap = lap.squeeze(1)
 
         return lap
+
+    def _get_spectral_operators(self, H: int, W: int, device: torch.device):
+        """Get or compute spectral operators for given resolution."""
+        if H == self.resolution and W == self.resolution:
+            return self.kx, self.ky, self.k_squared_inv
+
+        # Dynamically compute for different resolution
+        k_y = torch.fft.fftfreq(H, d=1/H, device=device) * 2 * math.pi / self.L
+        k_x = torch.fft.fftfreq(W, d=1/W, device=device) * 2 * math.pi / self.L
+        kx = k_x[None, :].expand(H, W)
+        ky = k_y[:, None].expand(H, W)
+        k_squared = kx**2 + ky**2
+        k_squared_inv = torch.where(
+            k_squared == 0,
+            torch.zeros_like(k_squared),
+            1.0 / k_squared
+        )
+        return kx, ky, k_squared_inv
 
     def vorticity_to_velocity(
         self,
@@ -139,9 +180,12 @@ class VorticityResidual:
             omega = omega.unsqueeze(1)
             squeeze = True
 
+        B, C, H, W = omega.shape
+        kx, ky, k_squared_inv = self._get_spectral_operators(H, W, omega.device)
+
         # Solve Poisson equation for stream function
         omega_hat = torch.fft.fft2(omega)
-        psi_hat = -omega_hat * self.k_squared_inv
+        psi_hat = -omega_hat * k_squared_inv
 
         # Compute velocity from stream function
         u_hat = 1j * self.ky * psi_hat
@@ -204,8 +248,9 @@ class VorticityResidual:
         else:
             domega_dt = torch.zeros_like(omega_curr)
 
-        # Forcing term (Kolmogorov flow)
-        forcing = self.forcing
+        # Forcing term (Kolmogorov flow) - get for current resolution
+        H, W = omega_curr.shape[-2:]
+        forcing = self._get_forcing(H, W, omega_curr.device)
 
         # Residual: ∂ω/∂t + u·∇ω - ν∇²ω - f
         # With linear damping term (0.1ω) as in original code
