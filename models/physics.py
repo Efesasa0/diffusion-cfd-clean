@@ -91,8 +91,8 @@ class VorticityResidual:
         B, C, H, W = field.shape
         kx, ky, _ = self._get_spectral_operators(H, W, field.device)
 
-        # FFT
-        field_hat = torch.fft.fft2(field)
+        # FFT (ensure contiguous for cuFFT)
+        field_hat = torch.fft.fft2(field.contiguous())
 
         # Multiply by ik
         if direction == 'x':
@@ -137,7 +137,8 @@ class VorticityResidual:
         B, C, H, W = field.shape
         k_squared = self._get_k_squared(H, W, field.device)
 
-        field_hat = torch.fft.fft2(field)
+        # Ensure contiguous for cuFFT
+        field_hat = torch.fft.fft2(field.contiguous())
         lap_hat = -k_squared * field_hat
         lap = torch.fft.ifft2(lap_hat).real
 
@@ -181,15 +182,21 @@ class VorticityResidual:
             squeeze = True
 
         B, C, H, W = omega.shape
+
+        # Debug: print tensor shape if FFT might fail
+        if H == 0 or W == 0:
+            raise ValueError(f"Invalid tensor dimensions for FFT: {omega.shape}")
+
         kx, ky, k_squared_inv = self._get_spectral_operators(H, W, omega.device)
 
         # Solve Poisson equation for stream function
-        omega_hat = torch.fft.fft2(omega)
+        # Ensure tensor is contiguous for cuFFT
+        omega_hat = torch.fft.fft2(omega.contiguous())
         psi_hat = -omega_hat * k_squared_inv
 
         # Compute velocity from stream function
-        u_hat = 1j * self.ky * psi_hat
-        v_hat = -1j * self.kx * psi_hat
+        u_hat = 1j * ky * psi_hat
+        v_hat = -1j * kx * psi_hat
 
         u = torch.fft.ifft2(u_hat).real
         v = torch.fft.ifft2(v_hat).real
